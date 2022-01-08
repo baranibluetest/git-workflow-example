@@ -1,0 +1,489 @@
+---
+- name: ACI Control Script
+  hosts: localhost  # This script is runs the following python modules on the localhost: ACI cobra
+
+
+  ##### Info #####
+  ## This Program: ##
+  # - Create ACI Underlay - Access Policies
+  # - Creates the ACI Overlay
+  # - Maps EPGS the BMH App and Web Servers
+
+
+  ## Run Playbook from ansible server ##
+  # Edit the Variables section for your tenant
+  # Upload file to a linux server with ansible installed
+
+  # Run command:
+  # ansible-playbook ACI_ansible.yml
+
+  # refer https://docs.ansible.com/ansible/2.5/scenario_guides/guide_aci.html
+
+
+  ##### Variables #####
+  # Change these as relevant for you Groups
+  # Note: Variable are not normally in this file as better for reuse
+  #####################
+
+  vars:
+    # TENANT_NUMBER: <group> - 1 to 16
+    TENANT_NUMBER: G
+    # Example:
+    # TENANT_NUMBER: 16
+
+
+    # FAB_NO: <fabric No> - 1 or 2
+    FAB_NO: F
+    # Example:
+    # FAB_NO: 1
+
+
+    # Port number only - without the eth1/
+    # ETH_PORT: <port> - see table in lab guide
+    ETH_PORT: pp
+    # Example:
+    # ETH_PORT: 27
+
+
+    # VLAN_START_END: <VLAN> - FGG1
+    VLAN_START_END: "F##1"
+    # Example:
+    # VLAN_START_END: "1171"
+
+
+# -------------------------------------------------------
+# Explore BUT Do NOT change anything below this line
+# -------------------------------------------------------
+
+    ##### Calculated Variables #####
+    # Tenant Number to 2 Significant Figures - adds leading 0 for Tenant 1-9
+    TENANT_NUMBER_LEAD0: "{{ '%02d' | format(TENANT_NUMBER|int) }}"
+
+
+
+
+    # Leaf IDs
+    Leaf1_ID: "{{ FAB_NO }}201"
+    Leaf2_ID: "{{ FAB_NO }}202"
+
+
+    # Final state of the task: Use present for adding or absent for removing
+    final_state: present
+
+    # The following is a list of the variables that are common for all Groups
+
+    ##### ACI authentication #####
+    aci_login: &aci_login
+      hostname: apic1.fab{{ FAB_NO }}.hl.dns
+      username: T{{ TENANT_NUMBER_LEAD0 }}
+      password: "!@34QWer"
+      validate_certs: false
+      state: "{{ final_state }}"
+
+
+    ##### Tenant Variables #####
+    tenant_name: "Tenant{{ TENANT_NUMBER_LEAD0 }}_ansible"
+    vrf_name: vrf_ansible
+    ap_name: ap_ansible
+
+    Server_Info:
+      - bd_name: app_bd_ansible
+        bd_subnet: "10.1{{ TENANT_NUMBER_LEAD0 }}.11.1"
+        bd_subnet_mask: 24
+        epg_name: epg_app_ansible
+        server_leaf: "{{ Leaf1_ID }}"
+        eth_port: 1/{{ ETH_PORT }}
+        interface_type: switch_port
+
+      - bd_name: web_bd_ansible
+        bd_subnet: "10.1{{ TENANT_NUMBER_LEAD0 }}.12.1"
+        bd_subnet_mask: 24
+        epg_name: epg_web_ansible
+        server_leaf: "{{ Leaf2_ID }}"
+        eth_port: 1/{{ ETH_PORT }}
+        interface_type: fex
+        fex_extpaths: 192
+
+
+
+    ##### Underlay Variables #####
+    vlan_pool_name: T{{ TENANT_NUMBER_LEAD0 }}:vlanpool_ansible
+    phys_domain_name: T{{ TENANT_NUMBER_LEAD0 }}:physdom_ansible
+    aep_name: T{{ TENANT_NUMBER_LEAD0 }}:aaep_ansible
+    pol_grp_name: T{{ TENANT_NUMBER_LEAD0 }}:accessportpolgrp_ansible
+
+    # Assumes the link level (speed) policy has been defined
+    intpol_speed: 1Gbps-Link
+    intprof_name: T{{ TENANT_NUMBER_LEAD0 }}:intprof_ansible
+    swprof_name: T{{ TENANT_NUMBER_LEAD0 }}:leafprof_ansible
+
+
+    # Existing Infrastructure on ACI
+    Fex_Int_Profile_Name: Shared:192_FEX.Prof
+
+
+
+  ##### Tasks Start Here #####
+  tasks:
+    ## Access Policies ##
+    # name: is is the Display name for task
+    # aci_vlan_pool: is the Ansible Module that is being called
+    # The <<: inputs all variable from dictionary called aci_login (google yaml anchor and alias)
+    # The following are variables used by this module
+
+    - name: Create VLAN Pool
+      aci_vlan_pool:
+        <<: *aci_login
+        description: "VLAN Pool Created by Ansible"
+        pool: "{{ vlan_pool_name }}"
+        pool_allocation_mode: static
+
+
+    - name: Add a new VLAN encap block
+      aci_vlan_pool_encap_block:
+        <<: *aci_login
+        pool: "{{ vlan_pool_name }}"
+        block_start: "{{ VLAN_START_END }}"
+        block_end: "{{ VLAN_START_END }}"
+        block_name: vlan_block
+        pool_allocation_mode: static
+
+
+    - name: Add a new physical domain
+      aci_domain:
+        <<: *aci_login
+        domain: "{{ phys_domain_name }}"
+        domain_type: phys
+
+
+    - name: Bind a phys domain to VLAN pool
+      aci_domain_to_vlan_pool:
+        <<: *aci_login
+        domain: "{{ phys_domain_name }}"
+        domain_type: phys
+        pool: "{{ vlan_pool_name }}"
+        pool_allocation_mode: static
+
+
+    - name: Add a new AAEP
+      aci_aep:
+        <<: *aci_login
+        aep: "{{ aep_name }}"
+        description: AAEP Created by Ansible
+
+
+    - name: Add AEP to domain binding
+      # the &binding_present is an anchor that supports recursive objects
+      aci_aep_to_domain: &binding_present
+        <<: *aci_login
+        aep: "{{ aep_name }}"
+        domain: "{{ phys_domain_name }}"
+        domain_type: phys
+
+
+    - name: Create a Leaf Access Port Policy Group
+      aci_interface_policy_leaf_policy_group:
+        <<: *aci_login
+        policy_group: "{{ pol_grp_name }}"
+        lag_type: leaf
+        link_level_policy: "{{ intpol_speed }}"
+        aep: "{{ aep_name }}"
+
+
+    - name: Add a new leaf_interface_profile
+      aci_interface_policy_leaf_profile:
+        <<: *aci_login
+        leaf_interface_profile: "{{ intprof_name }}"
+        description:  Ansible Leaf Interface Profile
+
+
+    - name: Associate an Interface Access Port Selector to an Interface Policy Leaf Profile with a Policy Group - Switch
+      aci_access_port_to_interface_policy_leaf_profile:
+        <<: *aci_login
+        leaf_interface_profile: "{{ intprof_name }}"
+        access_port_selector: T{{ TENANT_NUMBER_LEAD0 }}:1:{{ TENANT_NUMBER_LEAD0 }}
+        leaf_port_blk: port_blk_name
+        from: "{{ ETH_PORT }}"
+        to: "{{ ETH_PORT }}"
+        policy_group: "{{ pol_grp_name }}"
+
+
+
+    # - name: Associate an Interface Access Port Selector to an Interface Policy Leaf Profile with a Policy Group - Fex
+    #   aci_access_port_to_interface_policy_leaf_profile:
+    #     <<: *aci_login
+    #     leaf_interface_profile: "{{ Fex_Int_Profile_Name }}"
+    #     access_port_selector: T{{ TENANT_NUMBER_LEAD0 }}:1:{{ TENANT_NUMBER_LEAD0 }}
+    #     port_blk: port_blk_name
+    #     from: "{{ ETH_PORT }}"
+    #     to: "{{ ETH_PORT }}"
+    #     policy_group: "{{ pol_grp_name }}"
+
+
+
+    - name: creating a Leaf Profile with description
+      aci_switch_policy_leaf_profile:
+        <<: *aci_login
+        leaf_profile: "{{ swprof_name }}"
+        description: Ansible SW profile
+
+
+    - name: adding a switch policy leaf profile selector associated Node Block range (w/o policy group)
+      aci_switch_leaf_selector:
+        <<: *aci_login
+        leaf_profile: "{{ swprof_name }}"
+        leaf: leaf_selector
+        leaf_node_blk: node_blk
+        from: "{{ Leaf1_ID }}"
+        to: "{{ Leaf2_ID }}"
+
+
+    - name: Associating an interface selector profile to a switch policy leaf profile
+      aci_interface_selector_to_switch_policy_leaf_profile:
+        <<: *aci_login
+        leaf_profile: "{{ swprof_name }}"
+        interface_selector: "{{ intprof_name }}"
+
+
+
+    ## Tenant Policies ##
+    - name: Create Tenant
+      aci_tenant:
+        <<: *aci_login
+        description: "Created by Ansible"
+        tenant: '{{ tenant_name }}'
+
+
+    - name: Create VRF
+      aci_vrf:
+        <<: *aci_login
+        tenant: '{{ tenant_name }}'
+        vrf_name: '{{ vrf_name }}'
+
+
+    - name: Create Application Profile
+      aci_ap:
+        <<: *aci_login
+        tenant: '{{ tenant_name }}'
+        app_profile: '{{ ap_name }}'
+
+
+    - name: Create Bridge Domains
+      aci_bd:
+        <<: *aci_login
+        tenant: '{{ tenant_name }}'
+        vrf: '{{ vrf_name }}'
+        bd: '{{ item.bd_name }}'
+        enable_routing: yes
+      # Note indention of with_items it is part of the task, not a variable of the module
+      with_items:
+        - "{{ Server_Info }}"
+
+
+    - name: Create Bridge Domain Subnets
+      aci_bd_subnet:
+        <<: *aci_login
+        tenant: '{{ tenant_name }}'
+        bd: '{{ item.bd_name }}'
+        gateway: '{{ item.bd_subnet }}'
+        mask: '{{ item.bd_subnet_mask }}'
+        scope: private
+      with_items:
+        - "{{ Server_Info }}"
+
+
+    - name: Create End Point Groups
+      aci_epg:
+        <<: *aci_login
+        tenant: '{{ tenant_name }}'
+        app_profile: '{{ ap_name }}'
+        epg: '{{ item.epg_name }}'
+        bd: '{{ item.bd_name }}'
+      with_items:
+        - "{{ Server_Info }}"
+
+
+
+    - name: Create Filter
+      aci_filter:
+        <<: *aci_login
+        filter: ansible_filter
+        description: Filter from Ansible
+        tenant: '{{ tenant_name }}'
+
+
+    - name: Create Filter Entry
+      aci_filter_entry:
+        <<: *aci_login
+        tenant: '{{ tenant_name }}'
+        filter: ansible_filter
+        description: Ansible All Filter
+        entry: ansible_filter_entry
+        ether_type: ip
+
+
+    - name: Create Contract
+      aci_contract:
+        <<: *aci_login
+        tenant: '{{ tenant_name }}'
+        contract: Contract_ansible_ALL
+        scope: tenant
+
+
+    - name: Create Contract Subject
+      aci_contract_subject:
+        <<: *aci_login
+        tenant: '{{ tenant_name }}'
+        contract: Contract_ansible_ALL
+        contract_subject: subject_ansible
+        reverse_filter: yes
+
+
+    - name: Bind Contract Subjects to Filters
+      aci_contract_subject_to_filter:
+        <<: *aci_login
+        tenant: '{{ tenant_name }}'
+        contract: Contract_ansible_ALL
+        contract_subject: subject_ansible
+        filter: ansible_filter
+
+
+    - name: Bind EPGs to Consume Contract
+      aci_epg_to_contract:
+        <<: *aci_login
+        tenant: '{{ tenant_name }}'
+        app_profile: '{{ ap_name }}'
+        epg: '{{ item.epg_name }}'
+        contract: Contract_ansible_ALL
+        contract_type: consumer
+      with_items:
+        - "{{ Server_Info }}"
+
+
+    - name: Bind EPGs to Provide Contract
+      aci_epg_to_contract:
+        <<: *aci_login
+        tenant: '{{ tenant_name }}'
+        app_profile: '{{ ap_name }}'
+        epg: '{{ item.epg_name }}'
+        contract: Contract_ansible_ALL
+        contract_type: provider
+      with_items:
+        - "{{ Server_Info }}"
+
+
+    - name: Bind EPGs and Domains
+      aci_epg_to_domain:
+        <<: *aci_login
+        tenant: '{{ tenant_name }}'
+        app_profile: '{{ ap_name }}'
+        epg: '{{ item.epg_name }}'
+        domain: '{{ phys_domain_name }}'
+        domain_type: phys
+      with_items:
+        - "{{ Server_Info }}"
+
+
+    - name: Deploy Static Path binding for given EPG
+      aci_static_binding_to_epg:
+        <<: *aci_login
+        tenant: '{{ tenant_name }}'
+        ap: '{{ ap_name }}'
+        epg: '{{ item.epg_name }}'
+        encap_id: "{{ VLAN_START_END }}"
+        interface_mode: 802.1p
+        interface_type: '{{ item.interface_type }}'
+        pod_id: 1
+        leafs: '{{ item.server_leaf }}'
+        interface: '{{ item.eth_port }}'
+        extpaths: "{{ item.fex_extpaths | default(omit) }}"
+      with_items:
+        - "{{ Server_Info }}"
+
+
+
+
+
+    - name: Associate an Interface Access Port Selector to an Interface Policy Leaf Profile with a Policy Group - Using Rest API
+      aci_rest:
+        hostname: apic1.fab{{ FAB_NO }}.hl.dns
+        username: T{{ TENANT_NUMBER_LEAD0 }}
+        password: "!@34QWer"
+        validate_certs: false
+        path: /api/mo/uni.json
+        method: post
+        content:  '{
+"totalCount": "1",
+"imdata": [{
+    "infraFexP": {
+        "attributes": {
+            "annotation": "",
+            "descr": "reconfiguration by Tenant{{ TENANT_NUMBER_LEAD0 }} using ansble",
+            "dn": "uni/infra/fexprof-{{ Fex_Int_Profile_Name }}",
+            "name": "{{ Fex_Int_Profile_Name }}",
+            "nameAlias": "",
+            "ownerKey": "",
+            "ownerTag": "",
+            "userdom": ":all:common:T{{ TENANT_NUMBER_LEAD0 }}_SecDom:"
+        },
+        "children": [{
+            "infraHPortS": {
+                "attributes": {
+                    "annotation": "",
+                    "descr": "T{{ TENANT_NUMBER_LEAD0 }} WebServer BM",
+                    "name": "T{{ TENANT_NUMBER_LEAD0 }}:1:{{ ETH_PORT }}",
+                    "nameAlias": "",
+                    "ownerKey": "",
+                    "ownerTag": "",
+                    "type": "range",
+                    "userdom": ":all:common:T{{ TENANT_NUMBER_LEAD0 }}_SecDom:"
+                },
+                "children": [{
+                    "infraRsAccBaseGrp": {
+                        "attributes": {
+                            "annotation": "",
+                            "fexId": "101",
+                            "tDn": "uni/infra/funcprof/accportgrp-{{ pol_grp_name }}",
+                            "userdom": ":all:common:T{{ TENANT_NUMBER_LEAD0 }}_SecDom:"
+                        }
+                    }
+                }, {
+                    "infraPortBlk": {
+                        "attributes": {
+                            "annotation": "",
+                            "descr": "T{{ TENANT_NUMBER_LEAD0 }}:BM WebServer",
+                            "fromCard": "1",
+                            "fromPort": "{{ ETH_PORT }}",
+                            "name": "block2",
+                            "nameAlias": "",
+                            "toCard": "1",
+                            "toPort": "{{ ETH_PORT }}",
+                            "userdom": ":all:common:T{{ TENANT_NUMBER_LEAD0 }}_SecDom:"
+                        }
+                    }
+                }]
+            }
+        }, {
+            "infraFexBndlGrp": {
+                "attributes": {
+                    "annotation": "",
+                    "name": "{{ Fex_Int_Profile_Name }}",
+                    "nameAlias": "",
+                    "ownerKey": "",
+                    "ownerTag": "",
+                    "userdom": ":all:common:T{{ TENANT_NUMBER_LEAD0 }}_SecDom:"
+                },
+                "children": [{
+                    "infraRsMonFexInfraPol": {
+                        "attributes": {
+                            "annotation": "",
+                            "tnMonInfraPolName": "",
+                            "userdom": "all"
+                        }
+                    }
+                }]
+            }
+        }]
+    }
+}]
+}'
